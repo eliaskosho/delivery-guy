@@ -20,51 +20,41 @@ tools/
 
 ---
 
-## 1. After launch: fill in CONFIG
+## 1. CONFIG (launch data)
 
-Open `main.js`. The first thing in the file is:
+Open `main.js`. The first thing in the file is the `CONFIG` block. It is the only thing you edit; every other file reads from it.
 
-```js
-const CONFIG = {
-  contractAddress: null,
-  buyUrl: null,
-  dexscreener: null,
-  dextools: null,
-  coinmarketcap: null,
-  coingecko: null,
-
-  upsTokenAddress: null,
-  distributorAddress: null,
-  totalDistributedCall: null,
-};
-```
-
-Fill in what you have. Everything else stays `null`. No other file needs to change.
-
-| Key | What to paste | What it switches on |
+| Key | Current value | What it switches on |
 |---|---|---|
-| `contractAddress` | `$DELIVERY` token address, `0x…` | CA in topbar + hero, copy button, Blockscout link, live panel |
-| `buyUrl` | pons trade page. **Optional**: if you leave it `null` and `contractAddress` is set, the site uses `https://www.ponsfamily.com/launchpad/<contractAddress>` (that is the pattern pons uses) | All "Buy" buttons go live |
-| `dexscreener`, `dextools`, `coinmarketcap`, `coingecko` | Full URLs | Chips under the live panel. Missing ones are removed from the page, never shown as dead links |
-| `upsTokenAddress` | UPS stock token contract on Robinhood Chain | Needed for the distribution stats |
-| `distributorAddress` | The contract that sends UPS to holders (the token vault for this launch) | "Total UPS delivered", "Last payout", countdown anchoring |
-| `totalDistributedCall` | Optional `{ to: '0x…', data: '0x…' }` for an `eth_call` that returns the lifetime total as `uint256` | Exact lifetime total. Without it the site sums recent payouts from Blockscout and shows "≈" |
+| `contractAddress` | `0x9A88…0989` | CA in topbar + hero, copy button, Blockscout link, live panel |
+| `buyUrl` | pons trade page for the token | Every "Buy" button and the footer pons link. If `null`, derived as `https://www.ponsfamily.com/launchpad/<contractAddress>` |
+| `dexscreener` | pair page on DEXScreener | Hero button, chip under the live panel, footer link. The pair id in the URL is also what the live panel reads price, market cap and 24 h volume from |
+| `dextools`, `coinmarketcap`, `coingecko` | `null` until listed | Chips under the live panel. `null` = removed from the page, never a dead link |
+| `explorer` | Blockscout token page | All "Blockscout" links. `null` = derived from the chain explorer + `contractAddress` |
+| `telegram`, `x` | community links | Every Telegram / X link on the page |
+| `upsTokenAddress` | UPS stock token on Robinhood Chain | Distribution stats |
+| `distributorAddress` | pons holder-distributor for this launch (the pool's creator-fee recipient) | "Total UPS delivered", "Last payout", countdown anchoring |
+| `feeEscrowAddress` | pons V2 fee escrow | "… UPS collected, waiting for the next payout" under the total |
+| `totalDistributedCall` | `null` | Optional `{ to, data }` `eth_call` returning the lifetime total as `uint256`. Without it the site sums payouts read from Blockscout and shows "≈" |
 
-Before launch the site shows: buy buttons as **"Launching soon"**, **"CA revealed at launch"**, stats as **—** with "Live after launch".
+Setting a key back to `null` returns that part of the page to its pre-launch state ("Launching soon", "CA revealed at launch", stats as "—").
 
 ### Where the live numbers come from
 
 | Stat | Source |
 |---|---|
 | Supply, decimals | Robinhood Chain RPC (`eth_call`) |
-| Holders | Blockscout API v2 (`/api/v2/tokens/<address>`) |
-| Price in UPS, USD, market cap | DEXScreener public API (needs a pair to be indexed) |
-| Total distributed, last payout | Blockscout token transfers sent by `distributorAddress` in `upsTokenAddress`, or `totalDistributedCall` |
+| Holders | Blockscout API v2 (`/api/v2/tokens/<address>`, fallback `/counters`) |
+| Price, market cap, 24 h volume, trade count | DEXScreener public API, pair taken from `dexscreener` |
+| Total distributed, last payout | Blockscout: UPS transfers sent by `distributorAddress`, or `totalDistributedCall` |
+| UPS collected, waiting for payout | `feeEscrowAddress.balanceOfToken(distributorAddress, upsTokenAddress)` via RPC |
 | Countdown | Anchored to the last payout time when known, otherwise to 5-minute wall-clock marks |
 
 If a source is down, the panel keeps the last known values (cached in the browser) with an "Updated HH:MM" stamp and the status "Reconnecting". It never shows a spinner forever.
 
-> **Once the pons holder-distribution setting is live**, put the vault/distributor contract in `distributorAddress` and the UPS token in `upsTokenAddress`. The reader assumes UPS leaves that contract as ERC-20 transfers to holders. If the vault exposes a lifetime-total view, add it as `totalDistributedCall` for an exact figure. Anything else lives in `readDistributions()` in `main.js`, one self-contained function.
+### How the fee reaches holders (as observed on-chain, 2026-09-06)
+
+Every swap in the UPS pool pays its fee to the pons hook, which sweeps it into the pons fee escrow. The escrow credits the creator side to `distributorAddress`, a pons holder-distributor proxy, and the protocol side to a protocol address. A pons keeper claims the distributor's balance and multi-sends UPS to holders in one transaction; each round shows up as ERC-20 transfers from `distributorAddress`, which is what the live panel reads. Until the first round lands, the panel says "Waiting for first payout" and shows the escrow balance collected so far.
 
 ---
 
@@ -135,10 +125,12 @@ Opening `index.html` directly from disk works too, except the gallery manifest l
 | RPC | `https://rpc.mainnet.chain.robinhood.com` |
 | Explorer | `https://robinhoodchain.blockscout.com` |
 | Launchpad | pons V2, `https://www.ponsfamily.com/launchpad` |
-| Paired asset | UPS stock token |
+| Contract | `0x9A881D5cC0A1Ff529AeF0F0A79D6BeEFF6e90989` (verified on Blockscout as `PonsV2LauncherToken`) |
+| Pair | UPS / DELIVERY, DEXScreener id `0x21c17bf5…de2c1`, launched 2026-09-05 22:39 UTC |
+| Paired asset | UPS stock token, `0xf23250dac154D05Bb671CB0d0eBEf3c635c79CE2` |
 | Supply | 1,000,000,000, fixed |
 | Fee | 1% of every trade, in UPS |
-| Distribution | to all holders, every 5 minutes, in UPS |
+| Distribution | to all holders, every 5 minutes, in UPS (the cadence is the project's statement; the live panel shows what actually lands on-chain) |
 | Telegram | `https://t.me/deliveryguytg` |
 | X | `https://x.com/DeliveryGuyRHoo` |
 

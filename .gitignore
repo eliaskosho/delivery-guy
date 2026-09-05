@@ -3,3 +3,9 @@
 Thumbs.db
 desktop.ini
 *.swp
+
+# Dependencies / secrets / logs
+node_modules/
+.env
+.env.*
+*.log

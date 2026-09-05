@@ -6,40 +6,52 @@
 'use strict';
 
 /* ------------------------------------------------------------
-   1. CONFIG — fill these in after launch
+   1. CONFIG — launch data. This is the only block you edit.
    ------------------------------------------------------------
-   - Leave a value as null while unknown. The site handles it:
-     buy buttons show "Launching soon", the CA reads "CA revealed
-     at launch", missing links are removed, stats show "—".
+   - null = unknown. The site handles it: buy buttons show
+     "Launching soon", the CA reads "CA revealed at launch",
+     missing links are removed (never a dead "#"), stats show "—".
    - As soon as a value is set, the matching UI switches on.
    ------------------------------------------------------------ */
 const CONFIG = {
-  // $DELIVERY token contract on Robinhood Chain (0x…). Turns on: CA display, copy,
-  // explorer link, and the live panel (holders, supply, price via DEXScreener).
-  contractAddress: null,
+  // $DELIVERY token contract on Robinhood Chain. Turns on: CA display + copy,
+  // explorer link, and the live panel (holders, supply, price, market cap, volume).
+  contractAddress: '0x9A881D5cC0A1Ff529AeF0F0A79D6BeEFF6e90989',
 
-  // pons trade page. If left null while contractAddress is set, it is derived as
+  // pons trade page. If null while contractAddress is set, it is derived as
   // https://www.ponsfamily.com/launchpad/<contractAddress>
-  buyUrl: null,
+  buyUrl: 'https://www.ponsfamily.com/launchpad/0x9A881D5cC0A1Ff529AeF0F0A79D6BeEFF6e90989',
 
-  // Chart / listing links. null = hidden entirely.
-  dexscreener: null,
+  // Chart / listing links. null = hidden entirely, never a dead link.
+  // The DEXScreener URL also tells the live panel which pair to read
+  // price, market cap and 24 h volume from.
+  dexscreener: 'https://dexscreener.com/robinhood/0x21c17bf5ad43fd9e47c40f4a2f8eb1300c77def7f69e43c56c0559cb4f2de2c1',
   dextools: null,
   coinmarketcap: null,
   coingecko: null,
 
-  /* ---- Optional: extra sources for the live panel -----------------------
-     The distribution stats need to know where UPS is sent from.
-     - upsTokenAddress:      UPS stock token contract on Robinhood Chain
-     - distributorAddress:   the contract that pays holders (the token vault for this launch)
-     - totalDistributedCall: optional eth_call that returns the lifetime total as uint256,
-                             e.g. { to: '0xVault…', data: '0x…' } if the vault exposes one.
-                             If null, the total is summed from recent outgoing UPS transfers
-                             (bounded, shown with "≈").
+  // Explorer page for the token. null = derived from the chain explorer + contractAddress.
+  explorer: 'https://robinhoodchain.blockscout.com/token/0x9A881D5cC0A1Ff529AeF0F0A79D6BeEFF6e90989',
+
+  // Socials. Every Telegram / X link on the page follows these.
+  telegram: 'https://t.me/deliveryguytg',
+  x: 'https://x.com/DeliveryGuyRHoo',
+
+  /* ---- Distribution stats ("Total UPS delivered", "Last payout") --------
+     - upsTokenAddress:      UPS stock token on Robinhood Chain (the pair's quote asset)
+     - distributorAddress:   the contract that sends UPS to holders (pons token vault).
+                             null = those two tiles read "Waiting for first payout".
+     - totalDistributedCall: optional eth_call { to: '0x…', data: '0x…' } returning the
+                             lifetime total as uint256. null = summed from recent
+                             transfers read from Blockscout, shown with "≈".
+     - feeEscrowAddress:     pons V2 fee escrow. Its balanceOfToken(distributor, UPS) is
+                             the UPS already collected for holders and waiting for the
+                             next payout. null = that line is simply not shown.
   ------------------------------------------------------------------------- */
-  upsTokenAddress: null,
-  distributorAddress: null,
+  upsTokenAddress: '0xf23250dac154D05Bb671CB0d0eBEf3c635c79CE2',
+  distributorAddress: '0xc96e6a31c0cb9d451afe427648f541eaa37c6d0a',   // creator-fee recipient of the pool: pons holder-distributor proxy
   totalDistributedCall: null,
+  feeEscrowAddress: '0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e',
 };
 
 /* ------------------------------------------------------------
@@ -83,14 +95,21 @@ function fmtAmount(n, unit = '') {
   if (n == null || !isFinite(n)) return '—';
   let s;
   if (n === 0) s = '0';
-  else if (Math.abs(n) < 0.0001) s = n.toExponential(2);
+  else if (Math.abs(n) < 0.0001) s = n.toLocaleString('en-US', { maximumSignificantDigits: 3 });   // 0.00000131, never 1.31e-6
   else if (Math.abs(n) < 1) s = n.toLocaleString('en-US', { maximumSignificantDigits: 4 });
   else if (Math.abs(n) < 10_000) s = n.toLocaleString('en-US', { maximumFractionDigits: 2 });
   else s = fmtCompact(n);
   return unit ? `${s} ${unit}` : s;
 }
 function fmtInt(n) { return (n == null || !isFinite(n)) ? '—' : Math.round(n).toLocaleString('en-US'); }
-function fmtUsd(n) { return (n == null || !isFinite(n)) ? null : '$' + fmtCompact(n, 2); }
+function fmtUsd(n) {
+  if (n == null || !isFinite(n)) return null;
+  const abs = Math.abs(n);
+  if (abs >= 1000) return '$' + fmtCompact(n, 2);
+  if (abs >= 1) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (abs === 0) return '$0';
+  return '$' + n.toLocaleString('en-US', { maximumSignificantDigits: 4 });   // sub-cent prices keep their digits
+}
 function fmtAgo(tsSec) {
   const d = Math.max(0, Math.floor(Date.now() / 1000 - tsSec));
   if (d < 45) return 'just now';
@@ -184,7 +203,7 @@ function initContractAddress() {
   });
 
   $$('[data-explorer-link]').forEach((a) => {
-    if (ca) { a.href = `${CHAIN.explorer}/token/${ca}`; a.hidden = false; }
+    if (ca) { a.href = CONFIG.explorer || `${CHAIN.explorer}/token/${ca}`; a.hidden = false; }
     else if (a.dataset.explorerFallback) { a.href = a.dataset.explorerFallback; a.hidden = false; }
     else { a.hidden = true; }
   });
@@ -192,6 +211,7 @@ function initContractAddress() {
 
 function initBuyButtons() {
   const url = resolvedBuyUrl();
+  $$('[data-buy-link]').forEach((a) => { if (url) a.href = url; });   // plain links (footer): keep their fallback when unknown
   $$('[data-buy]').forEach((a) => {
     if (url) {
       a.href = url; a.target = '_blank'; a.rel = 'noopener';
@@ -216,6 +236,14 @@ function initListingLinks() {
   });
   if (isAddress(CONFIG.contractAddress)) any = true;   // explorer chip is shown in that case
   if (box) box.hidden = !any;
+}
+
+function initSocialLinks() {
+  const map = [['https://t.me/', CONFIG.telegram], ['https://x.com/', CONFIG.x], ['https://twitter.com/', CONFIG.x]];
+  $$('a[href]').forEach((a) => {
+    const href = a.getAttribute('href') || '';
+    for (const [prefix, url] of map) if (url && href.startsWith(prefix)) a.href = url;
+  });
 }
 
 /* ------------------------------------------------------------
@@ -270,9 +298,9 @@ function initAddNetwork() {
    Sources:
      - Robinhood Chain RPC (eth_call)           supply, decimals, optional totalDistributed
      - Blockscout API v2 (same explorer)        holders, recent UPS transfers from the vault
-     - DEXScreener public API (CORS enabled)    price in UPS/USD, market cap
+     - DEXScreener public API (CORS enabled)    price in UPS/USD, market cap, 24 h volume
    ------------------------------------------------------------ */
-const SEL = { totalSupply: '0x18160ddd', decimals: '0x313ce567' };
+const SEL = { totalSupply: '0x18160ddd', decimals: '0x313ce567', balanceOfToken: '0xf59e38b7' /* balanceOfToken(address,address) */ };
 
 async function readTokenBasics(token) {
   const [supplyHex, decHex] = await Promise.all([ethCall(token, SEL.totalSupply), ethCall(token, SEL.decimals)]);
@@ -281,23 +309,52 @@ async function readTokenBasics(token) {
 }
 
 async function readHolders(token) {
-  const j = await fetchJson(`${CHAIN.explorer}/api/v2/tokens/${token}`);
-  const h = j.holders_count ?? j.holders;
-  return h != null ? Number(h) : null;
+  // The token endpoint carries the indexed holder count. The light "counters" endpoint
+  // lags behind on fresh tokens, so it is only the fallback.
+  try {
+    const j = await fetchJson(`${CHAIN.explorer}/api/v2/tokens/${token}`);
+    const h = j.holders_count ?? j.holders;
+    if (h != null) return Number(h);
+  } catch { /* fall through */ }
+  const c = await fetchJson(`${CHAIN.explorer}/api/v2/tokens/${token}/counters`);
+  return c.token_holders_count != null ? Number(c.token_holders_count) : null;
 }
 
-async function readMarket(token) {
-  const j = await fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${token}`);
-  const pairs = Array.isArray(j.pairs) ? j.pairs : [];
+// "https://dexscreener.com/<chain>/<pair>" → { chain, pair }, or null.
+function dexPairRef(url) {
+  const m = typeof url === 'string' ? url.match(/dexscreener\.com\/([a-z0-9-]+)\/(0x[0-9a-f]{40,64})/i) : null;
+  return m ? { chain: m[1].toLowerCase(), pair: m[2] } : null;
+}
+function pickPair(pairs) {
   if (!pairs.length) return null;
   // Prefer the UPS-quoted pair; otherwise the deepest one.
   const ups = pairs.find((p) => /ups/i.test(p.quoteToken?.symbol || ''));
-  const best = ups || pairs.slice().sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+  return ups || pairs.slice().sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+}
+
+async function readMarket(token) {
+  let pairs = [];
+  const ref = dexPairRef(CONFIG.dexscreener);
+  if (ref) {
+    try {
+      const j = await fetchJson(`https://api.dexscreener.com/latest/dex/pairs/${ref.chain}/${ref.pair}`);
+      pairs = Array.isArray(j.pairs) ? j.pairs : (j.pair ? [j.pair] : []);
+    } catch { /* fall back to the token endpoint */ }
+  }
+  if (!pairs.length) {
+    const j = await fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${token}`);
+    pairs = Array.isArray(j.pairs) ? j.pairs : [];
+  }
+  const best = pickPair(pairs);
+  if (!best) return null;
+  const tx = best.txns?.h24;
   return {
     priceInQuote: best.priceNative != null ? Number(best.priceNative) : null,
     quoteSymbol: best.quoteToken?.symbol || null,
     priceUsd: best.priceUsd != null ? Number(best.priceUsd) : null,
     marketCapUsd: best.marketCap ?? best.fdv ?? null,
+    volume24hUsd: best.volume?.h24 != null ? Number(best.volume.h24) : null,
+    txns24h: tx ? Number(tx.buys || 0) + Number(tx.sells || 0) : null,
   };
 }
 
@@ -306,11 +363,19 @@ async function readDistributions() {
   if (!isAddress(from) || !isAddress(ups)) return null;
 
   const upsDecimals = Number(hexToBig(await ethCall(ups, SEL.decimals))) || 18;
-  const out = { total: null, totalIsApprox: false, last: null };
+  const out = { total: null, totalIsApprox: false, last: null, pending: null };
 
   // Lifetime total: exact if the vault exposes a view, otherwise a bounded sum of recent transfers.
   if (call && isAddress(call.to) && call.data) {
     try { out.total = bigToNum(hexToBig(await ethCall(call.to, call.data)), upsDecimals); } catch { /* fall through */ }
+  }
+
+  // UPS credited to the distributor in the pons fee escrow but not paid out yet.
+  if (isAddress(CONFIG.feeEscrowAddress)) {
+    try {
+      const word = (a) => a.slice(2).toLowerCase().padStart(64, '0');
+      out.pending = bigToNum(hexToBig(await ethCall(CONFIG.feeEscrowAddress, SEL.balanceOfToken + word(from) + word(ups))), upsDecimals);
+    } catch { /* optional line, skip on failure */ }
   }
 
   // Recent outgoing UPS transfers from the vault, newest first.
@@ -361,9 +426,12 @@ async function fetchStats() {
     priceUsd: market?.priceUsd ?? null,
     marketCapUps: priceUps != null ? priceUps * supply : null,
     marketCapUsd: market?.marketCapUsd ?? (market?.priceUsd != null ? market.priceUsd * supply : null),
+    volume24hUsd: market?.volume24hUsd ?? null,
+    txns24h: market?.txns24h ?? null,
     totalDistributed: dist?.total ?? null,
     totalIsApprox: dist?.totalIsApprox ?? false,
     lastPayout: dist?.last ?? null,
+    pendingFees: dist?.pending ?? null,
   };
 }
 
@@ -398,7 +466,7 @@ function renderStats(s, { stale = false } = {}) {
 
   if (!s) {
     // Pre-launch placeholders
-    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap'].forEach((k) => setStat(k, '—', k === 'price' ? 'in UPS · Live after launch' : 'Live after launch'));
+    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' ? 'in UPS · Live after launch' : 'Live after launch'));
     setStat('countdown', '—', 'Every 5 minutes');
     if (status) status.textContent = 'Live after launch';
     if (dot) dot.className = 'dot';
@@ -406,9 +474,10 @@ function renderStats(s, { stale = false } = {}) {
     return;
   }
 
+  const pendingNote = s.pendingFees != null ? ` · ${fmtAmount(s.pendingFees, 'UPS')} collected, waiting for the next payout` : '';
   setStat('totalDistributed',
     s.totalDistributed != null ? `${s.totalIsApprox ? '≈ ' : ''}${fmtAmount(s.totalDistributed, 'UPS')}` : '—',
-    s.totalDistributed != null ? (s.totalIsApprox ? 'Sum of recent payouts, read from Blockscout' : 'Lifetime, read on-chain') : 'Waiting for first payout');
+    (s.totalDistributed != null ? (s.totalIsApprox ? 'Sum of recent payouts, read from Blockscout' : 'Lifetime, read on-chain') : 'Waiting for first payout') + pendingNote);
 
   if (s.lastPayout) {
     setStat('lastPayout', fmtAmount(s.lastPayout.amount, 'UPS'),
@@ -424,6 +493,9 @@ function renderStats(s, { stale = false } = {}) {
   if (s.marketCapUps != null) setStat('marketCap', fmtAmount(s.marketCapUps, 'UPS'), s.marketCapUsd != null ? `≈ ${fmtUsd(s.marketCapUsd)}` : 'Price × supply');
   else if (s.marketCapUsd != null) setStat('marketCap', fmtUsd(s.marketCapUsd), 'USD');
   else setStat('marketCap', '—', 'Not available yet');
+
+  if (s.volume24hUsd != null) setStat('volume', fmtUsd(s.volume24hUsd), s.txns24h != null ? `${fmtInt(s.txns24h)} trades · last 24 h` : 'USD · last 24 h');
+  else setStat('volume', '—', 'Not available yet');
 
   if (status) status.textContent = stale ? 'Reconnecting' : (s.partial ? 'Delivering (partial data)' : 'Delivering');
   if (dot) dot.className = `dot ${stale ? 'is-stale' : 'is-live'}`;
@@ -666,6 +738,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initContractAddress();
   initBuyButtons();
   initListingLinks();
+  initSocialLinks();
   initCopyButtons();
   initAddNetwork();
   initLivePanel();

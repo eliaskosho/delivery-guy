@@ -60,6 +60,7 @@
     <symbol id="i-telegram" viewBox="0 0 24 24"><path d="M21.5 4.2 18.4 19.6c-.2 1-.9 1.3-1.8.8l-4.8-3.6-2.3 2.3c-.3.3-.5.5-1 .5l.3-4.9 9-8.2c.4-.4-.1-.6-.6-.2L6.1 13.4 1.4 11.9c-1-.3-1-1 .2-1.5L20.1 3c.8-.3 1.6.2 1.4 1.2z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18.2 2.3h3.3l-7.2 8.2 8.5 11.2h-6.7l-5.2-6.8-6 6.8H1.7l7.7-8.8L1.3 2.3h6.8l4.7 6.2 5.4-6.2zm-1.2 17.5h1.8L7.1 4.1H5.1l11.9 15.7z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 6-8"/></symbol>
   </defs>
 </svg>
 
@@ -115,6 +116,9 @@
       </a>
       <a class="btn btn--ghost btn--lg" href="https://x.com/DeliveryGuyRHoo" target="_blank" rel="noopener" aria-label="Delivery Guy on X">
         <svg class="ico" aria-hidden="true"><use href="#i-x"/></svg> X
+      </a>
+      <a class="btn btn--ghost btn--lg" data-link="dexscreener" href="#" target="_blank" rel="noopener">
+        <svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg> DEXScreener
       </a>
     </div>
 
@@ -191,6 +195,11 @@
         <p class="stat__label">Market cap</p>
         <p class="stat__value" data-stat="marketCap">—</p>
         <p class="stat__note" data-stat-note="marketCap">Live after launch</p>
+      </article>
+      <article class="stat">
+        <p class="stat__label">24 h volume</p>
+        <p class="stat__value" data-stat="volume">—</p>
+        <p class="stat__note" data-stat-note="volume">Live after launch</p>
       </article>
     </div>
 
@@ -427,7 +436,8 @@
       <nav class="footer__links" aria-label="Links">
         <a href="https://t.me/deliveryguytg" target="_blank" rel="noopener"><svg class="ico" aria-hidden="true"><use href="#i-telegram"/></svg> Telegram</a>
         <a href="https://x.com/DeliveryGuyRHoo" target="_blank" rel="noopener"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg> X</a>
-        <a href="https://www.ponsfamily.com/launchpad" target="_blank" rel="noopener">pons <svg class="ico" aria-hidden="true"><use href="#i-external"/></svg></a>
+        <a data-buy-link href="https://www.ponsfamily.com/launchpad" target="_blank" rel="noopener">pons <svg class="ico" aria-hidden="true"><use href="#i-external"/></svg></a>
+        <a data-link="dexscreener" href="#" target="_blank" rel="noopener">DEXScreener <svg class="ico" aria-hidden="true"><use href="#i-external"/></svg></a>
         <a data-explorer-link data-explorer-fallback="https://robinhoodchain.blockscout.com" href="https://robinhoodchain.blockscout.com" target="_blank" rel="noopener">Blockscout <svg class="ico" aria-hidden="true"><use href="#i-external"/></svg></a>
       </nav>
     </div>
