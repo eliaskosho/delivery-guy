@@ -37,19 +37,23 @@ const CONFIG = {
   telegram: 'https://t.me/deliveryguytg',
   x: 'https://x.com/DeliveryGuyRHoo',
 
-  /* ---- Distribution stats ("Total UPS delivered", "Last payout") --------
-     - upsTokenAddress:      UPS stock token on Robinhood Chain (the pair's quote asset)
-     - distributorAddress:   the contract that sends UPS to holders (pons token vault).
-                             null = those two tiles read "Waiting for first payout".
-     - totalDistributedCall: optional eth_call { to: '0x…', data: '0x…' } returning the
-                             lifetime total as uint256. null = summed from recent
-                             transfers read from Blockscout, shown with "≈".
-     - feeEscrowAddress:     pons V2 fee escrow. Its balanceOfToken(distributor, UPS) is
-                             the UPS already collected for holders and waiting for the
-                             next payout. null = that line is simply not shown.
+  /* ---- Distribution stats ("Total UPS delivered", "Last payout", "Next payout") ---
+     - upsTokenAddress:       UPS stock token on Robinhood Chain (the pair's quote asset)
+     - distributorAddress:    the contract that sends UPS to holders (pons holder distributor).
+                              null = those tiles read "Distributor not configured".
+     - distributionFromBlock: first block of the payout scan (just before the pool went live).
+                              null = the scan is capped to the last ~3.5 days, total shown "≈".
+     - totalDistributedCall:  optional eth_call { to: '0x…', data: '0x…' } returning the
+                              lifetime total as uint256, if the vault ever exposes one.
+                              null = summed from every payout round found on-chain.
+     - feeEscrowAddress:      pons V2 fee escrow. Its balanceOfToken(distributor, UPS) is
+                              the UPS already collected for holders and waiting for the
+                              next round. null = that line is simply not shown.
+     The payout cadence is never configured: it is measured from real rounds.
   ------------------------------------------------------------------------- */
   upsTokenAddress: '0xf23250dac154D05Bb671CB0d0eBEf3c635c79CE2',
   distributorAddress: '0xc96e6a31c0cb9d451afe427648f541eaa37c6d0a',   // creator-fee recipient of the pool: pons holder-distributor proxy
+  distributionFromBlock: 55484000,   // block just before the pool went live (2026-09-05 22:39 UTC): the payout scan starts here
   totalDistributedCall: null,
   feeEscrowAddress: '0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e',
 };
@@ -66,13 +70,13 @@ const CHAIN = {
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
 };
 const PONS_LAUNCHPAD = 'https://www.ponsfamily.com/launchpad';
-const DISTRIBUTION_INTERVAL_S = 5 * 60;   // payouts every 5 minutes
+// Payout cadence is measured from real rounds (measureCadence), never assumed.
 const STATS_POLL_MS = 30_000;
 const FETCH_TIMEOUT_MS = 9_000;
 const DEFAULT_SUPPLY = 1_000_000_000;
 const GALLERY_DIR = 'assets/gallery/';
 const BANNER_CANDIDATES = ['assets/banner.webp', 'assets/banner.jpg', 'assets/banner.png'];
-const STORAGE_KEY = 'dg.stats.v1';
+const STORAGE_KEY = 'dg.stats.v2';
 
 /* ------------------------------------------------------------
    3. Small helpers
@@ -296,11 +300,33 @@ function initAddNetwork() {
    fetchStats() returns a plain object; nulls mean "unknown".
    Each source is independent: if one fails the others still render.
    Sources:
-     - Robinhood Chain RPC (eth_call)           supply, decimals, optional totalDistributed
-     - Blockscout API v2 (same explorer)        holders, recent UPS transfers from the vault
-     - DEXScreener public API (CORS enabled)    price in UPS/USD, market cap, 24 h volume
+     - Robinhood Chain RPC         supply, decimals, UPS uiMultiplier (ERC-8056),
+       (eth_call, eth_getLogs)     escrow balance, every payout round since launch
+     - Blockscout API v2           holders; payout rounds as a bounded fallback
+     - DEXScreener public API      price in UPS and USD, market cap, 24 h volume
+
+   Distribution model, as observed on-chain (2026-09-06):
+     swap fee → pons hook → pons fee escrow (credited to the distributor)
+     → the pons keeper claims it into the distributor → one multi-send
+     transaction pays holders in UPS. A payout round is therefore a set
+     of ERC-20 Transfer logs from distributorAddress inside one tx.
+     The cadence is whatever the keeper actually does: it is measured
+     from real rounds, never assumed.
    ------------------------------------------------------------ */
-const SEL = { totalSupply: '0x18160ddd', decimals: '0x313ce567', balanceOfToken: '0xf59e38b7' /* balanceOfToken(address,address) */ };
+const SEL = {
+  totalSupply: '0x18160ddd',
+  decimals: '0x313ce567',
+  balanceOfToken: '0xf59e38b7',   // balanceOfToken(address,address) — pons fee escrow
+  uiMultiplier: '0xa60bf13d',     // uiMultiplier() — ERC-8056, implemented by the UPS stock token
+};
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const LOG_CHUNK_START = 250_000;  // blocks per eth_getLogs call; halved whenever a call fails
+const LOG_CHUNK_MIN = 2_000;
+const CADENCE_SAMPLE = 8;         // newest payout rounds used to measure the cadence
+const DIST_CACHE_KEY = 'dg.dist.v1';
+
+const word = (a) => a.slice(2).toLowerCase().padStart(64, '0');
+const toHexBlock = (n) => '0x' + n.toString(16);
 
 async function readTokenBasics(token) {
   const [supplyHex, decHex] = await Promise.all([ethCall(token, SEL.totalSupply), ethCall(token, SEL.decimals)]);
@@ -358,47 +384,176 @@ async function readMarket(token) {
   };
 }
 
-async function readDistributions() {
-  const { distributorAddress: from, upsTokenAddress: ups, totalDistributedCall: call } = CONFIG;
-  if (!isAddress(from) || !isAddress(ups)) return null;
+/* ---- UPS units --------------------------------------------------------------
+   Every amount is kept and summed in raw token units (BigInt). The ERC-8056
+   uiMultiplier is applied only when a number is displayed. */
+let upsUnits = null;
+async function readUpsUnits(ups) {
+  if (upsUnits) return upsUnits;
+  const decimals = Number(hexToBig(await ethCall(ups, SEL.decimals))) || 18;
+  let multiplier = 1;
+  try {
+    const m = bigToNum(hexToBig(await ethCall(ups, SEL.uiMultiplier)), 18);
+    if (m > 0 && isFinite(m)) multiplier = m;
+  } catch { /* token has no uiMultiplier(): display raw units */ }
+  upsUnits = { decimals, multiplier };
+  return upsUnits;
+}
 
-  const upsDecimals = Number(hexToBig(await ethCall(ups, SEL.decimals))) || 18;
-  const out = { total: null, totalIsApprox: false, last: null, pending: null };
+/* ---- Payout rounds ----------------------------------------------------------
+   Cached in localStorage so a page load never repeats the whole backfill:
+   only blocks after `scannedTo` are fetched on each refresh. */
+function loadDistCache(from, ups) {
+  try {
+    const j = JSON.parse(localStorage.getItem(DIST_CACHE_KEY) || 'null');
+    if (!j || j.distributor !== from.toLowerCase() || j.ups !== ups.toLowerCase() || j.fromBlock !== CONFIG.distributionFromBlock) return null;
+    return j;
+  } catch { return null; }
+}
+function saveDistCache(c) {
+  try { localStorage.setItem(DIST_CACHE_KEY, JSON.stringify(c)); } catch { /* storage blocked or full */ }
+}
 
-  // Lifetime total: exact if the vault exposes a view, otherwise a bounded sum of recent transfers.
-  if (call && isAddress(call.to) && call.data) {
-    try { out.total = bigToNum(hexToBig(await ethCall(call.to, call.data)), upsDecimals); } catch { /* fall through */ }
-  }
-
-  // UPS credited to the distributor in the pons fee escrow but not paid out yet.
-  if (isAddress(CONFIG.feeEscrowAddress)) {
+// eth_getLogs over [from, to]. A chunk that fails (timeout, rate limit, range cap) is halved and retried.
+async function getLogsChunked(filter, from, to) {
+  const out = [];
+  let chunk = LOG_CHUNK_START;
+  let f = from;
+  while (f <= to) {
+    const t = Math.min(f + chunk - 1, to);
     try {
-      const word = (a) => a.slice(2).toLowerCase().padStart(64, '0');
-      out.pending = bigToNum(hexToBig(await ethCall(CONFIG.feeEscrowAddress, SEL.balanceOfToken + word(from) + word(ups))), upsDecimals);
-    } catch { /* optional line, skip on failure */ }
+      out.push(...await rpc('eth_getLogs', [{ ...filter, fromBlock: toHexBlock(f), toBlock: toHexBlock(t) }]));
+      f = t + 1;
+    } catch (err) {
+      if (chunk <= LOG_CHUNK_MIN) throw err;
+      chunk = Math.floor(chunk / 2);
+      await new Promise((r) => setTimeout(r, 400));
+    }
   }
+  return out;
+}
 
-  // Recent outgoing UPS transfers from the vault, newest first.
+// One transaction = one payout round.
+function roundsFromLogs(logs) {
+  const byTx = new Map();
+  for (const l of logs) {
+    const r = byTx.get(l.transactionHash) || { tx: l.transactionHash, block: parseInt(l.blockNumber, 16), ts: null, recipients: 0, amountRaw: 0n };
+    r.recipients += 1;
+    r.amountRaw += hexToBig(l.data);
+    byTx.set(l.transactionHash, r);
+  }
+  return [...byTx.values()];
+}
+
+// Fallback when the RPC is unavailable: the newest transfers from Blockscout, a few pages only.
+async function readRoundsFromBlockscout(from, ups) {
   const base = `${CHAIN.explorer}/api/v2/addresses/${from}/token-transfers?type=ERC-20&filter=from&token=${ups}`;
-  let url = base, pages = 0, sum = 0, items = [];
-  const MAX_PAGES = out.total == null ? 6 : 1;
-  while (url && pages < MAX_PAGES) {
+  let url = base;
+  let pages = 0;
+  const items = [];
+  while (url && pages < 4) {
     const j = await fetchJson(url);
-    const batch = Array.isArray(j.items) ? j.items : [];
-    items = items.concat(batch);
-    for (const it of batch) sum += Number(it.total?.value || 0) / 10 ** Number(it.total?.decimals ?? upsDecimals);
-    pages++;
+    items.push(...(Array.isArray(j.items) ? j.items : []));
+    pages += 1;
     url = j.next_page_params ? `${base}&${new URLSearchParams(j.next_page_params)}` : null;
   }
-  if (out.total == null && items.length) { out.total = sum; out.totalIsApprox = Boolean(url); }
-
-  // A payout round = every transfer sharing the newest block.
-  if (items.length) {
-    const newestBlock = items[0].block_number ?? items[0].block;
-    const round = items.filter((it) => (it.block_number ?? it.block) === newestBlock);
-    const amount = round.reduce((s, it) => s + Number(it.total?.value || 0) / 10 ** Number(it.total?.decimals ?? upsDecimals), 0);
-    out.last = { amount, time: Math.floor(new Date(items[0].timestamp).getTime() / 1000), recipients: round.length };
+  const byTx = new Map();
+  for (const it of items) {
+    const tx = it.transaction_hash || it.tx_hash;
+    if (!tx) continue;
+    const r = byTx.get(tx) || { tx, block: Number(it.block_number), ts: Math.floor(new Date(it.timestamp).getTime() / 1000), recipients: 0, amountRaw: 0n };
+    r.recipients += 1;
+    r.amountRaw += BigInt(it.total?.value || 0);
+    byTx.set(tx, r);
   }
+  return { rounds: [...byTx.values()], complete: url === null };
+}
+
+// Median gap between the newest rounds. null until two rounds exist.
+function measureCadence(rounds) {
+  const withTs = rounds.filter((r) => r.ts).slice(-CADENCE_SAMPLE);
+  if (withTs.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < withTs.length; i++) gaps.push(withTs[i].ts - withTs[i - 1].ts);
+  gaps.sort((a, b) => a - b);
+  const mid = gaps.length / 2;
+  const medianS = gaps.length % 2 ? gaps[Math.floor(mid)] : (gaps[mid - 1] + gaps[mid]) / 2;
+  return { medianS, samples: gaps.length, minS: gaps[0], maxS: gaps[gaps.length - 1] };
+}
+
+async function readDistributions() {
+  const from = CONFIG.distributorAddress;
+  const ups = CONFIG.upsTokenAddress;
+  if (!isAddress(from) || !isAddress(ups)) return null;
+
+  const units = await readUpsUnits(ups);
+  const out = {
+    ok: false, source: null, partial: false,
+    rounds: 0, totalRaw: '0', totalIsBounded: false, last: null, cadence: null,
+    pendingRaw: null, decimals: units.decimals, multiplier: units.multiplier,
+  };
+
+  // UPS credited to the distributor in the pons fee escrow, not paid out yet. Optional line.
+  if (isAddress(CONFIG.feeEscrowAddress)) {
+    try { out.pendingRaw = hexToBig(await ethCall(CONFIG.feeEscrowAddress, SEL.balanceOfToken + word(from) + word(ups))).toString(); }
+    catch { /* line is skipped */ }
+  }
+
+  const cache = loadDistCache(from, ups) || {
+    distributor: from.toLowerCase(), ups: ups.toLowerCase(), fromBlock: CONFIG.distributionFromBlock,
+    scannedTo: null, rounds: [],
+  };
+  let rounds = cache.rounds.map((r) => ({ ...r, amountRaw: BigInt(r.amountRaw) }));
+
+  try {
+    const latest = parseInt(await rpc('eth_blockNumber'), 16);
+    if (cache.scannedTo == null) {
+      // First scan. Without a launch block the scan is capped to the last ~3.5 days and marked "≈".
+      if (Number.isInteger(CONFIG.distributionFromBlock)) cache.scannedTo = CONFIG.distributionFromBlock - 1;
+      else { cache.scannedTo = Math.max(0, latest - 3_000_000); out.totalIsBounded = true; }
+    }
+    if (latest > cache.scannedTo) {
+      const logs = await getLogsChunked({ address: ups, topics: [TRANSFER_TOPIC, '0x' + word(from)] }, cache.scannedTo + 1, latest);
+      const known = new Set(rounds.map((r) => r.tx));
+      for (const r of roundsFromLogs(logs)) if (!known.has(r.tx)) rounds.push(r);
+      cache.scannedTo = latest;
+    }
+    rounds.sort((a, b) => a.block - b.block);
+    // Block timestamps for the newest rounds only (cadence and "x min ago"). Older rounds keep null.
+    for (const r of rounds.slice(-CADENCE_SAMPLE)) {
+      if (r.ts) continue;
+      const b = await rpc('eth_getBlockByNumber', [toHexBlock(r.block), false]);
+      r.ts = parseInt(b.timestamp, 16);
+    }
+    saveDistCache({ ...cache, rounds: rounds.map((r) => ({ ...r, amountRaw: r.amountRaw.toString() })) });
+    out.ok = true;
+    out.source = 'rpc';
+  } catch {
+    // RPC failed. Cached rounds still count; without a cache Blockscout gives a bounded view.
+    out.partial = true;
+    if (rounds.length) { out.ok = true; out.source = 'cache'; }
+    else {
+      try {
+        const bs = await readRoundsFromBlockscout(from, ups);
+        rounds = bs.rounds.sort((a, b) => a.block - b.block);
+        out.ok = true;
+        out.source = 'blockscout';
+        out.totalIsBounded = !bs.complete;
+      } catch { /* nothing available right now */ }
+    }
+  }
+  if (!out.ok) return out;
+
+  out.rounds = rounds.length;
+  out.totalRaw = rounds.reduce((s, r) => s + r.amountRaw, 0n).toString();
+  const call = CONFIG.totalDistributedCall;
+  if (call && isAddress(call.to) && call.data) {
+    // The vault exposes an exact lifetime total: prefer it.
+    try { out.totalRaw = hexToBig(await ethCall(call.to, call.data)).toString(); out.totalIsBounded = false; } catch { /* keep the sum */ }
+  }
+  const last = rounds[rounds.length - 1];
+  if (last) out.last = { tx: last.tx, block: last.block, ts: last.ts, recipients: last.recipients, amountRaw: last.amountRaw.toString() };
+  out.cadence = measureCadence(rounds);
   return out;
 }
 
@@ -411,15 +566,17 @@ async function fetchStats() {
     readDistributions(),
   ]);
   const [basics, holders, market, dist] = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
-  const errors = settled.filter((r) => r.status === 'rejected').length;
-  if (errors === settled.length) throw new Error('All stat sources failed');
+  const failed = settled.filter((r) => r.status === 'rejected').length;
+  if (failed === settled.length) throw new Error('All stat sources failed');
 
   const supply = basics?.supply ?? DEFAULT_SUPPLY;
   const priceUps = market && /ups/i.test(market.quoteSymbol || '') ? market.priceInQuote : null;
+  // DEXScreener prices are per raw token unit, so this converts raw UPS amounts to USD.
+  const usdPerUps = priceUps && market?.priceUsd ? market.priceUsd / priceUps : null;
 
   return {
     updatedAt: Math.floor(Date.now() / 1000),
-    partial: errors > 0,
+    partial: failed > 0 || Boolean(dist && (dist.partial || !dist.ok)),
     holders,
     supply,
     priceUps,
@@ -428,10 +585,8 @@ async function fetchStats() {
     marketCapUsd: market?.marketCapUsd ?? (market?.priceUsd != null ? market.priceUsd * supply : null),
     volume24hUsd: market?.volume24hUsd ?? null,
     txns24h: market?.txns24h ?? null,
-    totalDistributed: dist?.total ?? null,
-    totalIsApprox: dist?.totalIsApprox ?? false,
-    lastPayout: dist?.last ?? null,
-    pendingFees: dist?.pending ?? null,
+    usdPerUps,
+    distribution: dist,   // null = no distributor configured
   };
 }
 
@@ -459,6 +614,18 @@ function saveCached(stats) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ contract: CONFIG.contractAddress, stats })); } catch { /* ignore */ }
 }
 
+// Raw UPS string → display text (uiMultiplier applied) and USD text.
+function upsText(raw, d) { return fmtAmount(bigToNum(BigInt(raw), d.decimals) * d.multiplier, 'UPS'); }
+function upsUsd(raw, d, usdPerUps) { return usdPerUps != null ? fmtUsd(bigToNum(BigInt(raw), d.decimals) * usdPerUps) : null; }
+
+function statusText(s, stale) {
+  if (stale) return 'Reconnecting';
+  const d = s.distribution;
+  if (d && !d.ok) return 'Partial data';
+  if (d && d.rounds === 0) return s.partial ? 'No payout yet · partial data' : 'No payout yet';
+  return s.partial ? 'Delivering · partial data' : 'Delivering';
+}
+
 function renderStats(s, { stale = false } = {}) {
   const dot = $('[data-live-dot]');
   const status = $('[data-live-status]');
@@ -467,37 +634,53 @@ function renderStats(s, { stale = false } = {}) {
   if (!s) {
     // Pre-launch placeholders
     ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' ? 'in UPS · Live after launch' : 'Live after launch'));
-    setStat('countdown', '—', 'Every 5 minutes');
+    setStat('countdown', '—', 'Measured from real payouts');
     if (status) status.textContent = 'Live after launch';
     if (dot) dot.className = 'dot';
     if (meta) meta.hidden = true;
     return;
   }
 
-  const pendingNote = s.pendingFees != null ? ` · ${fmtAmount(s.pendingFees, 'UPS')} collected, waiting for the next payout` : '';
-  setStat('totalDistributed',
-    s.totalDistributed != null ? `${s.totalIsApprox ? '≈ ' : ''}${fmtAmount(s.totalDistributed, 'UPS')}` : '—',
-    (s.totalDistributed != null ? (s.totalIsApprox ? 'Sum of recent payouts, read from Blockscout' : 'Lifetime, read on-chain') : 'Waiting for first payout') + pendingNote);
-
-  if (s.lastPayout) {
-    setStat('lastPayout', fmtAmount(s.lastPayout.amount, 'UPS'),
-      `${fmtAgo(s.lastPayout.time)} · ${fmtInt(s.lastPayout.recipients)} holders`);
-  } else setStat('lastPayout', '—', 'Waiting for first payout');
+  const d = s.distribution;
+  if (d && d.ok) {
+    const pend = d.pendingRaw != null ? ` · ${upsText(d.pendingRaw, d)} collected, waiting for the next round` : '';
+    if (d.rounds > 0) {
+      const usd = upsUsd(d.totalRaw, d, s.usdPerUps);
+      setStat('totalDistributed', `${d.totalIsBounded ? '≈ ' : ''}${upsText(d.totalRaw, d)}`,
+        `${usd ? '≈ ' + usd + ' · ' : ''}${fmtInt(d.rounds)} payout round${d.rounds === 1 ? '' : 's'} since launch${pend}`);
+    } else {
+      setStat('totalDistributed', '0 UPS', `No payout yet${pend}`);
+    }
+    if (d.last) {
+      const usd = upsUsd(d.last.amountRaw, d, s.usdPerUps);
+      setStat('lastPayout', upsText(d.last.amountRaw, d),
+        `${d.last.ts ? fmtAgo(d.last.ts) + ' · ' : ''}${fmtInt(d.last.recipients)} holders paid${usd ? ' · ≈ ' + usd : ''}`);
+    } else {
+      setStat('lastPayout', '—', 'No payout yet');
+    }
+  } else if (d) {
+    setStat('totalDistributed', '—', 'Payout data not available right now');
+    setStat('lastPayout', '—', 'Payout data not available right now');
+  } else {
+    setStat('totalDistributed', '—', 'Distributor not configured');
+    setStat('lastPayout', '—', 'Distributor not configured');
+  }
+  renderCountdown(s);
 
   setStat('holders', fmtInt(s.holders), s.holders != null ? 'On Robinhood Chain' : 'Not available right now');
 
   if (s.priceUps != null) setStat('price', fmtAmount(s.priceUps, 'UPS'), s.priceUsd != null ? `≈ ${fmtUsd(s.priceUsd)} per $DELIVERY` : 'per $DELIVERY');
   else if (s.priceUsd != null) setStat('price', fmtUsd(s.priceUsd), 'per $DELIVERY (USD)');
-  else setStat('price', '—', 'in UPS · not available yet');
+  else setStat('price', '—', 'in UPS · not available right now');
 
   if (s.marketCapUps != null) setStat('marketCap', fmtAmount(s.marketCapUps, 'UPS'), s.marketCapUsd != null ? `≈ ${fmtUsd(s.marketCapUsd)}` : 'Price × supply');
   else if (s.marketCapUsd != null) setStat('marketCap', fmtUsd(s.marketCapUsd), 'USD');
-  else setStat('marketCap', '—', 'Not available yet');
+  else setStat('marketCap', '—', 'Not available right now');
 
   if (s.volume24hUsd != null) setStat('volume', fmtUsd(s.volume24hUsd), s.txns24h != null ? `${fmtInt(s.txns24h)} trades · last 24 h` : 'USD · last 24 h');
-  else setStat('volume', '—', 'Not available yet');
+  else setStat('volume', '—', 'Not available right now');
 
-  if (status) status.textContent = stale ? 'Reconnecting' : (s.partial ? 'Delivering (partial data)' : 'Delivering');
+  if (status) status.textContent = statusText(s, stale);
   if (dot) dot.className = `dot ${stale ? 'is-stale' : 'is-live'}`;
   if (meta) {
     const t = new Date(s.updatedAt * 1000);
@@ -506,23 +689,27 @@ function renderStats(s, { stale = false } = {}) {
   }
 }
 
-function nextPayoutAt(s) {
-  // Anchor to the last payout if we know it, otherwise to 5-minute wall-clock marks.
-  const now = Date.now() / 1000;
-  if (s?.lastPayout?.time) {
-    let next = s.lastPayout.time + DISTRIBUTION_INTERVAL_S;
-    while (next < now) next += DISTRIBUTION_INTERVAL_S;
-    return next;
+// The countdown rests on the measured cadence only. No cadence, no countdown.
+function renderCountdown(s) {
+  const d = s?.distribution;
+  if (!d || !d.ok) { setStat('countdown', '—', d ? 'Payout data not available right now' : 'Distributor not configured'); return; }
+  if (!d.cadence || !d.last?.ts) {
+    setStat('countdown', '—', d.rounds === 1 ? 'One round so far · no cadence to measure yet' : 'No payout yet · nothing to measure');
+    return;
   }
-  return Math.ceil(now / DISTRIBUTION_INTERVAL_S) * DISTRIBUTION_INTERVAL_S;
+  const { medianS, samples } = d.cadence;
+  const mins = Math.max(1, Math.round(medianS / 60));
+  const now = Date.now() / 1000;
+  const remaining = d.last.ts + medianS - now;
+  const basis = `Estimated from the last ${samples + 1} rounds, ~${mins} min apart`;
+  if (remaining > 0) setStat('countdown', fmtClock(remaining), basis);
+  else if (now - d.last.ts < 3 * medianS) setStat('countdown', 'Due', `${basis} · last one ${fmtAgo(d.last.ts)}`);
+  else setStat('countdown', '—', `No round since ${fmtAgo(d.last.ts).replace(' ago', '')} ago · earlier rounds were ~${mins} min apart`);
 }
+
 function startCountdown() {
   clearInterval(live.countdownTimer);
-  const tick = () => {
-    if (!live.stats) return;
-    const remaining = nextPayoutAt(live.stats) - Date.now() / 1000;
-    setStat('countdown', fmtClock(remaining), live.stats.lastPayout ? 'Since last payout' : 'Estimated · every 5 minutes');
-  };
+  const tick = () => { if (live.stats) renderCountdown(live.stats); };
   tick();
   live.countdownTimer = setInterval(tick, 1000);
 }
