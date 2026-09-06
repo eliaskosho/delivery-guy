@@ -640,18 +640,22 @@ function statusText(s, stale) {
   return s.partial ? 'Delivering · partial data' : 'Delivering';
 }
 
-function renderStats(s, { stale = false } = {}) {
+function renderStats(s, { stale = false, unreachable = false } = {}) {
   const dot = $('[data-live-dot]');
   const status = $('[data-live-status]');
   const meta = $('[data-live-meta]');
 
   if (!s) {
-    // Pre-launch placeholders
-    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' ? 'in UPS · Live after launch' : 'Live after launch'));
-    setStat('countdown', '—', 'Measured from real payouts');
-    if (status) status.textContent = 'Live after launch';
-    if (dot) dot.className = 'dot';
-    if (meta) meta.hidden = true;
+    // Pre-launch placeholders, or (unreachable) every source failed and nothing is cached.
+    const note = unreachable ? 'Not available right now' : 'Live after launch';
+    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' && !unreachable ? 'in UPS · Live after launch' : note));
+    setStat('countdown', '—', unreachable ? note : 'Measured from real payouts');
+    if (status) status.textContent = unreachable ? 'Data sources unreachable' : 'Live after launch';
+    if (dot) dot.className = unreachable ? 'dot is-stale' : 'dot';
+    if (meta) {
+      meta.textContent = unreachable ? 'Retrying every 30 seconds' : '';
+      meta.hidden = !unreachable;
+    }
     return;
   }
 
@@ -740,7 +744,7 @@ async function refreshStats() {
   } catch {
     const cached = loadCached();
     if (cached) { live.stats = cached; renderStats(cached, { stale: true }); }
-    else renderStats(null);
+    else renderStats(null, { unreachable: true });
   }
 }
 
