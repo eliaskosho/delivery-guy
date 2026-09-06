@@ -640,17 +640,18 @@ function statusText(s, stale) {
   return s.partial ? 'Delivering · partial data' : 'Delivering';
 }
 
-function renderStats(s, { stale = false, unreachable = false } = {}) {
+function renderStats(s, { stale = false, unreachable = false, loading = false } = {}) {
   const dot = $('[data-live-dot]');
   const status = $('[data-live-status]');
   const meta = $('[data-live-meta]');
 
   if (!s) {
-    // Pre-launch placeholders, or (unreachable) every source failed and nothing is cached.
-    const note = unreachable ? 'Not available right now' : 'Live after launch';
-    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' && !unreachable ? 'in UPS · Live after launch' : note));
-    setStat('countdown', '—', unreachable ? note : 'Measured from real payouts');
-    if (status) status.textContent = unreachable ? 'Data sources unreachable' : 'Live after launch';
+    // Pre-launch placeholders; (loading) first fetch still running with nothing cached;
+    // (unreachable) every source failed and nothing is cached.
+    const note = unreachable ? 'Not available right now' : loading ? 'Reading the chain…' : 'Live after launch';
+    ['totalDistributed', 'lastPayout', 'holders', 'price', 'marketCap', 'volume'].forEach((k) => setStat(k, '—', k === 'price' && !unreachable && !loading ? 'in UPS · Live after launch' : note));
+    setStat('countdown', '—', unreachable || loading ? note : 'Measured from real payouts');
+    if (status) status.textContent = unreachable ? 'Data sources unreachable' : loading ? 'Reading the chain' : 'Live after launch';
     if (dot) dot.className = unreachable ? 'dot is-stale' : 'dot';
     if (meta) {
       meta.textContent = unreachable ? 'Retrying every 30 seconds' : '';
@@ -753,6 +754,7 @@ function initLivePanel() {
 
   const cached = loadCached();
   if (cached) { live.stats = cached; renderStats(cached, { stale: true }); }
+  else renderStats(null, { loading: true });
   startCountdown();
   refreshStats();
 
