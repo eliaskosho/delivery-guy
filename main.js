@@ -135,14 +135,25 @@ async function fetchJson(url, opts = {}) {
     return await res.json();
   } finally { clearTimeout(t); }
 }
-async function rpc(method, params = []) {
-  const json = await fetchJson(CHAIN.rpc, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  if (json.error) throw new Error(json.error.message || 'RPC error');
-  return json.result;
+// The public RPC rate-limits bursts (HTTP 429) and times out heavy log queries.
+// Those are retried with a short backoff; anything else fails straight away.
+async function rpc(method, params = [], attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      const json = await fetchJson(CHAIN.rpc, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      if (json.error) throw new Error(json.error.message || 'RPC error');
+      return json.result;
+    } catch (err) {
+      const msg = String((err && err.message) || err);
+      const retryable = i < attempts && /HTTP 429|HTTP 5\d\d|abort|timed out|rate/i.test(msg);
+      if (!retryable) throw err;
+      await new Promise((r) => setTimeout(r, 500 * i));
+    }
+  }
 }
 const ethCall = (to, data) => rpc('eth_call', [{ to, data }, 'latest']);
 const hexToBig = (hex) => (hex && hex !== '0x') ? BigInt(hex) : 0n;
@@ -520,10 +531,13 @@ async function readDistributions() {
     }
     rounds.sort((a, b) => a.block - b.block);
     // Block timestamps for the newest rounds only (cadence and "x min ago"). Older rounds keep null.
+    // A timestamp that cannot be read now is simply fetched on the next refresh.
     for (const r of rounds.slice(-CADENCE_SAMPLE)) {
       if (r.ts) continue;
-      const b = await rpc('eth_getBlockByNumber', [toHexBlock(r.block), false]);
-      r.ts = parseInt(b.timestamp, 16);
+      try {
+        const b = await rpc('eth_getBlockByNumber', [toHexBlock(r.block), false]);
+        r.ts = parseInt(b.timestamp, 16);
+      } catch { out.partial = true; }
     }
     saveDistCache({ ...cache, rounds: rounds.map((r) => ({ ...r, amountRaw: r.amountRaw.toString() })) });
     out.ok = true;
@@ -694,7 +708,10 @@ function renderCountdown(s) {
   const d = s?.distribution;
   if (!d || !d.ok) { setStat('countdown', '—', d ? 'Payout data not available right now' : 'Distributor not configured'); return; }
   if (!d.cadence || !d.last?.ts) {
-    setStat('countdown', '—', d.rounds === 1 ? 'One round so far · no cadence to measure yet' : 'No payout yet · nothing to measure');
+    let why = 'No payout yet · nothing to measure';
+    if (d.rounds === 1) why = 'One round so far · no cadence to measure yet';
+    else if (d.rounds > 1) why = 'Round times not available right now';
+    setStat('countdown', '—', why);
     return;
   }
   const { medianS, samples } = d.cadence;
