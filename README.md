@@ -1,21 +1,22 @@
 # Delivery Guy — deliveryguy.xyz
 
-Marketing site for **Delivery Guy ($DELIVERY)** on Robinhood Chain.
+Marketing site for **Delivery Guy ($DELIVERY)** on **Solana**, launched on **pump.fun**.
 Plain HTML, CSS and vanilla JS. No framework, no build step, no npm.
 
 ```
 index.html          the whole page
-styles.css          styles (dark base, lime accent #c5fa07)
-main.js             CONFIG + all behaviour (live panel, gallery, wallet button)
+styles.css          styles (dark base, green accent #06e076)
+main.js             CONFIG + all behaviour (live panel, gallery, copy buttons)
 assets/
   logo.webp         square mascot logo (topbar, footer)
   mascot.webp       cut-out mascot (hero)
   og.jpg            1200×630 social preview
   favicon-*.png, apple-touch-icon.png
-  banner.webp       wide banner shown above the gallery
+  banner.webp       wide banner above the gallery — optional, see below
   gallery/          memes shown on the site (read automatically, meme-01.webp ...)
 tools/
   optimize-images.py  resizes + converts memes to WebP and names them meme-NN.webp
+.env.example        only needed if you wire up the optional holder count
 ```
 
 ---
@@ -26,44 +27,52 @@ Open `main.js`. The first thing in the file is the `CONFIG` block. It is the onl
 
 | Key | Current value | What it switches on |
 |---|---|---|
-| `contractAddress` | `0x9A88…0989` | CA in topbar + hero, copy button, Blockscout link, live panel |
-| `buyUrl` | pons trade page for the token | Every "Buy" button and the footer pons link. If `null`, derived as `https://www.ponsfamily.com/launchpad/<contractAddress>` |
-| `dexscreener` | pair page on DEXScreener | Hero button, chip under the live panel, footer link. The pair id in the URL is also what the live panel reads price, market cap and 24 h volume from |
-| `dextools`, `coinmarketcap`, `coingecko` | `null` until listed | Chips under the live panel. `null` = removed from the page, never a dead link |
-| `explorer` | Blockscout token page | All "Blockscout" links. `null` = derived from the chain explorer + `contractAddress` |
+| `contractAddress` | `2Rbedk…Lzpump` | CA in topbar + hero, copy buttons, Solscan link, live panel |
+| `buyUrl` | pump.fun coin page | Every "Buy" button. If `null`, derived as `https://pump.fun/coin/<contractAddress>` |
+| `dexscreener` | token page on DEXScreener | Hero button, chip under the live panel, footer link |
+| `solscan` | Solscan token page | All "Solscan" links. `null` = derived from `contractAddress` |
 | `telegram`, `x` | community links | Every Telegram / X link on the page |
-| `upsTokenAddress` | UPS stock token on Robinhood Chain | Distribution stats |
-| `distributorAddress` | pons holder-distributor for this launch (the pool's creator-fee recipient) | "Total UPS delivered", "Last payout", measured cadence |
-| `distributionFromBlock` | block just before the pool went live | Where the payout scan starts. Without it the scan is capped to the last ~3.5 days and the total is shown with "≈" |
-| `feeEscrowAddress` | pons V2 fee escrow | "… UPS collected, waiting for the next payout" under the total |
-| `totalDistributedCall` | `null` | Optional `{ to, data }` `eth_call` returning the lifetime total as `uint256`. Without it the site sums payouts read from Blockscout and shows "≈" |
+| `dextools`, `coinmarketcap`, `coingecko` | `null` until listed | Chips under the live panel. `null` = removed from the page, never a dead link |
+| `holdersApiUrl` | `null` | The Holders tile. `null` = the tile is removed from the panel. See section 2 |
 
-Setting a key back to `null` returns that part of the page to its pre-launch state ("Launching soon", "CA revealed at launch", stats as "—").
+The contract address is a Solana **mint address**: base58, 32–44 characters, no `0`, `O`, `I` or `l`. It is validated against that, shortened as `2Rbe…zpump` in the topbar chip, and shown in full in the hero. Copy buttons always copy the full 44 characters, never the shortened form.
 
 ### Where the live numbers come from
 
 | Stat | Source |
 |---|---|
-| Supply, decimals | Robinhood Chain RPC (`eth_call`) |
-| Holders | Blockscout API v2 (`/api/v2/tokens/<address>`, fallback `/counters`) |
-| Price, market cap, 24 h volume, trade count | DEXScreener public API, pair taken from `dexscreener` |
-| Total distributed, last payout, round count | Robinhood Chain RPC: `eth_getLogs` for UPS transfers sent by `distributorAddress` since `distributionFromBlock`, chunked (250k blocks, halved on failure) and cached in the browser so only new blocks are scanned on refresh. Blockscout as a bounded fallback; `totalDistributedCall` if set |
-| UPS collected, waiting for payout | `feeEscrowAddress.balanceOfToken(distributorAddress, upsTokenAddress)` via RPC |
-| Countdown | Median gap between the newest payout rounds (up to 8), counted from the last round. Shows "—" until two rounds exist. Never a fixed interval |
+| Price, market cap, liquidity | DEXScreener, `GET /latest/dex/tokens/<mint>` |
+| 24 h volume, 24 h trades (buys + sells) | same call |
+| Holders | only if `holdersApiUrl` is set — see section 2 |
 
-If a source is down, the panel keeps the last known values (cached in the browser) with an "Updated HH:MM" stamp and the status "Reconnecting". It never shows a spinner forever.
+The response is an array of pairs. The site picks the deepest one by USD liquidity and breaks ties on 24 h volume, because while the token is still on the bonding curve DEXScreener reports no liquidity figure at all. Before the first trade the API answers `"pairs": null`, and the panel says *Waiting for the first trade* rather than showing an error.
 
-### How the fee reaches holders (as observed on-chain, 2026-09-06)
+**Note it is the `tokens` endpoint, not `pairs`.** The address above is the mint, and a mint has no pair address until something trades.
 
-Every swap in the UPS pool pays its fee to the pons hook, which sweeps it into the pons fee escrow. The escrow credits the creator side to `distributorAddress`, a pons holder-distributor proxy, and the protocol side to a protocol address. A pons keeper claims the distributor's balance and multi-sends UPS to holders in one transaction; each round shows up as ERC-20 transfers from `distributorAddress`, which is what the live panel reads.
+If a refresh fails, the last known values stay on screen with a timestamp and a *Showing last known values* note. There is no spinner that can hang, and no tile ever goes blank without saying why.
 
-Measured on launch night: the first round landed 2 h 23 min after launch, then rounds came roughly every 45 minutes (43 to 47 min over 7 rounds). Each round pays only holders whose share is above a small minimum (about 0.015 UPS); smaller shares are skipped that round. The panel says "No payout yet" until the first round lands, shows the escrow balance collected so far, and only counts down once two real rounds exist.
+### What the panel deliberately does not show
 
-UPS amounts are summed in raw units and displayed through the token's ERC-8056 `uiMultiplier()` (about 1.0022 at launch). USD values use the UPS price implied by the DEXScreener pair.
+There is **no payout countdown and no distribution total**. How pump.fun accounts for Trader Cashback on-chain is not publicly documented, so there is nothing here that can be read and verified. Rather than leave two dead cards in the panel, those tiles were removed. Do not add a timer for a payout whose cadence you cannot prove.
 
 ---
 
-## 2. Gallery: adding and removing memes
+## 2. Holder count (optional, off by default)
+
+Solana's public RPC cannot give a holder total. `getTokenLargestAccounts` returns the top accounts only, and `getProgramAccounts` over the token program is disabled on public endpoints (and would be far too large for a browser anyway). A real total needs an indexer — Helius, Birdeye or Solscan Pro — and all of them require an API key.
+
+**This site is static.** It has no server and no build step, so anything written into `main.js` is readable by anyone who opens the page. Do not paste a private API key into this repo.
+
+The workable options:
+
+1. **Leave it off** (default). `holdersApiUrl: null` removes the tile and the panel shows four live tiles.
+2. **Put a small proxy in front of it.** A serverless function that holds the key server-side, calls the indexer, and answers with JSON. Point `holdersApiUrl` at the proxy. `.env.example` lists the variables such a proxy would read.
+
+`holdersApiUrl` may contain `{mint}`, which is replaced with `contractAddress`. The response is searched for the first of `holders`, `holderCount`, `holder_count`, `total` or `result`, at the top level or inside `data`.
+
+---
+
+## 3. Gallery: adding and removing memes
 
 The gallery reads `assets/gallery/` automatically. Static hosts cannot list a folder, so the loader looks for files named:
 
@@ -74,7 +83,7 @@ assets/gallery/meme-03.webp
 ...
 ```
 
-`.webp`, `.jpg`, `.jpeg` and `.png` all work. Numbering can have gaps of up to five. Remove a file and it simply disappears; add `meme-24.webp` and it shows up. No code changes.
+`.webp`, `.jpg`, `.jpeg` and `.png` all work. Numbering can have gaps of up to five. Remove a file and it simply disappears; add `meme-15.webp` and it shows up. No code changes.
 
 **Optional custom order:** create `assets/gallery/manifest.json` with a JSON array of filenames, e.g. `["meme-05.webp", "meme-01.webp"]`. If that file exists, it wins over the probing.
 
@@ -87,15 +96,21 @@ python tools/optimize-images.py path/to/new-memes --out assets/gallery
 
 It converts to WebP (max 1080 px), skips duplicates, and continues the numbering from the highest existing `meme-NN`.
 
+### Banner
+
+`assets/banner.webp` is the wide strip above the gallery. **There is currently no banner file**, and the strip hides itself when the file is missing, so the page is correct without it. Drop a wide image in at that path (`.jpg` and `.png` also work) and it appears on the next load. Nothing to change in the code.
+
 ### Image note
 
-Every meme and the banner carry the feather mark, and most show the "Robinhood" wordmark on a van, scooter, bike or box. The logo and mascot carry the feather too. The project owner reviewed this on 2026-09-05 and chose to publish them as they are.
+The mascot art and the memes carry the real UPS shield and the "Pump.fun" wordmark, drawn into the artwork itself. That is the project owner's own artwork and their call to publish. The footer states plainly that the project is not affiliated with, endorsed by or sponsored by pump.fun, Solana or UPS.
 
-If you ever swap in mark-free versions: memes go in `assets/gallery/`, the banner is `assets/banner.webp` (the strip above the gallery disappears if the file is missing), and the brand files are `assets/logo.webp`, `assets/mascot.webp`, the favicons and `assets/og.jpg`.
+No third-party logo is used as site furniture: `pump.fun` is written as text everywhere in the interface, and every icon in the SVG sprite is hand-drawn.
+
+If you ever swap in mark-free versions: memes go in `assets/gallery/`, the banner is `assets/banner.webp`, and the brand files are `assets/logo.webp`, `assets/mascot.webp`, the favicons and `assets/og.jpg`.
 
 ---
 
-## 3. Deploy
+## 4. Deploy
 
 No build step. Upload the folder as-is.
 
@@ -122,28 +137,38 @@ Opening `index.html` directly from disk works too, except the gallery manifest l
 
 ---
 
-## 4. Facts baked into the site
+## 5. Facts baked into the site
 
 | | |
 |---|---|
-| Chain | Robinhood Chain, chain ID 4663 (`0x1237`), Arbitrum Orbit L2, gas in ETH |
-| RPC | `https://rpc.mainnet.chain.robinhood.com` |
-| Explorer | `https://robinhoodchain.blockscout.com` |
-| Launchpad | pons V2, `https://www.ponsfamily.com/launchpad` |
-| Contract | `0x9A881D5cC0A1Ff529AeF0F0A79D6BeEFF6e90989` (verified on Blockscout as `PonsV2LauncherToken`) |
-| Pair | UPS / DELIVERY, DEXScreener id `0x21c17bf5…de2c1`, launched 2026-09-05 22:39 UTC |
-| Paired asset | UPS stock token, `0xf23250dac154D05Bb671CB0d0eBEf3c635c79CE2` |
+| Chain | Solana |
+| Launchpad | pump.fun, `https://pump.fun` |
+| Mint | `2RbedkHKGCfJ7NyeQBGWSParreAzSeAn6D8GHqLzpump` |
+| Explorer | `https://solscan.io` |
+| Wallets named in the buy steps | Phantom, Solflare |
+| Paired asset | SOL |
 | Supply | 1,000,000,000, fixed |
-| Fee | A cut of every swap, in UPS. 1% creator tax on the bonding curve; after graduation the pool fee (about 0.3% measured), ~85% of it credited to the holder distributor |
-| Distribution | to holders, in UPS, in automatic rounds run by the pons keeper. Measured ~45 min apart on launch night; minimum ~0.015 UPS per holder per round. The live panel shows the real cadence |
-| Telegram | `https://t.me/deliveryguytg` |
-| X | `https://x.com/DeliveryGuyRHoo` |
+| Fee | 0.3% on every trade, charged by pump.fun |
+| Where the fee goes | **Trader Cashback** — back to the wallets trading the token, not to the creator. Chosen once before launch and irreversible |
+| Telegram | `https://t.me/deliveryguyonsol` |
+| X | `https://x.com/DeliveryGuy_SOL` |
 
-To change any copy, edit `index.html` directly. The "Add network to wallet" button calls `wallet_addEthereumChain` with the values in the `CHAIN` object at the top of `main.js`.
+Solana needs no network to be added to a wallet, so there is no "Add network" button and no chain-id, RPC or EVM code anywhere in this repo.
 
-## 5. House rules the copy follows
+To change any copy, edit `index.html` directly.
 
-- No "APY", "earn", "passive income", "guaranteed", no price predictions. Mechanics only.
-- `pons` in lowercase.
-- Risk text in the footer, including the US restriction for UPS-paired markets on pons.
+### Trader Cashback, stated carefully
+
+The site says exactly this and no more: pump.fun charges 0.3% on every trade; the creator chooses once, before launch and irreversibly, between keeping that fee and sending it to traders as cashback; this token sends it to traders; and the reward follows **trading**, so a wallet that buys and sits still earns nothing from it.
+
+**This is not a hold-to-earn token.** Any copy implying that a holder receives a share of fees for holding is wrong and must not be reintroduced.
+
+The payout schedule, the asset it arrives in, and where a trader sees or claims it are pump.fun's to define and are not documented publicly. The site therefore does not state any of them, and points people at pump.fun instead. Do not invent a number here.
+
+## 6. House rules the copy follows
+
+- No "APY", no "passive income", no "guaranteed", no price predictions. Mechanics only.
+- The only percentage on the page is the real 0.3% trade fee.
+- `pump.fun` in lowercase, always as text, never as a logo. No implied partnership.
+- Risk text in the footer: experimental token, cashback depends on other people trading, the token can lose all its value, do your own research.
 - No private key or seed phrase input anywhere. Ever.
