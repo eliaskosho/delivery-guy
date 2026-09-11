@@ -1,4 +1,4 @@
-# Delivery Guy — deliveryguy.xyz
+# Delivery Guy — deliveryguyups.com
 
 Marketing site for **Delivery Guy ($DELIVERY)** on **Solana**, launched on **pump.fun**.
 Plain HTML, CSS and vanilla JS. No framework, no build step, no npm.
@@ -98,7 +98,7 @@ It converts to WebP (max 1080 px), skips duplicates, and continues the numbering
 
 ### Banner
 
-`assets/banner.webp` is the wide strip above the gallery. **There is currently no banner file**, and the strip hides itself when the file is missing, so the page is correct without it. Drop a wide image in at that path (`.jpg` and `.png` also work) and it appears on the next load. Nothing to change in the code.
+`assets/banner.webp` is the wide strip above the gallery, currently the 1280×426 Wall Street banner. Swap the file to change it; `.jpg` and `.png` also work. If the file is missing the strip hides itself and the page is still correct, so nothing in the code needs touching either way.
 
 ### Image note
 
@@ -112,19 +112,15 @@ If you ever swap in mark-free versions: memes go in `assets/gallery/`, the banne
 
 ## 4. Deploy
 
-No build step. Upload the folder as-is.
+No build step. The folder is served as-is.
 
-**Vercel**
-1. Push this folder to a Git repo (GitHub, GitLab).
-2. vercel.com → Add New Project → import the repo.
-3. Framework preset: **Other**. Build command: empty. Output directory: `./` (root).
-4. Deploy. Add `deliveryguy.xyz` under Settings → Domains and point the DNS as Vercel shows.
+**How it is hosted today:** `www.deliveryguyups.com` runs on **Vercel**, wired to this GitHub repo. The bare domain redirects to `www`, which is why the canonical URL, `og:url` and the sitemap all use `https://www.deliveryguyups.com/`.
 
-Or from a terminal: `npx vercel --prod` inside the folder.
+Vercel builds production from the repo's production branch (`main`), so **a push to `main` goes live**. Pushing any other branch gives a preview deployment on its own URL and leaves the live site alone — that is the safe way to look at a change first.
 
-**GitHub Pages**
-1. Push to a repo. Settings → Pages → Source: *Deploy from a branch*, branch `main`, folder `/ (root)`.
-2. Add a file named `CNAME` containing `deliveryguy.xyz` and point your DNS (A records to GitHub Pages IPs, or a CNAME for `www`).
+Settings that matter, if the project is ever recreated: Framework preset **Other**, build command empty, output directory `./` (root).
+
+From a terminal: `npx vercel` for a preview, `npx vercel --prod` to publish.
 
 **Test locally**
 
