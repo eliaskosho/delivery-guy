@@ -33,7 +33,7 @@ Open `main.js`. The first thing in the file is the `CONFIG` block. It is the onl
 | `solscan` | Solscan token page | All "Solscan" links. `null` = derived from `contractAddress` |
 | `telegram`, `x` | community links | Every Telegram / X link on the page |
 | `dextools`, `coinmarketcap`, `coingecko` | `null` until listed | Chips under the live panel. `null` = removed from the page, never a dead link |
-| `holdersApiUrl` | `null` | The Holders tile. `null` = the tile is removed from the panel. See section 2 |
+| `holdersApiUrl` | `/api/holders` | The Holders tile, via the serverless proxy. `null` = the tile is removed outright. See section 2 |
 
 The contract address is a Solana **mint address**: base58, 32–44 characters, no `0`, `O`, `I` or `l`. It is validated against that, shortened as `2Rbe…zpump` in the topbar chip, and shown in full in the hero. Copy buttons always copy the full 44 characters, never the shortened form.
 
@@ -41,11 +41,18 @@ The contract address is a Solana **mint address**: base58, 32–44 characters, n
 
 | Stat | Source |
 |---|---|
-| Price, market cap, liquidity | DEXScreener, `GET /latest/dex/tokens/<mint>` |
+| Price, 24 h change, market cap, liquidity | DEXScreener token endpoint |
 | 24 h volume, 24 h trades (buys + sells) | same call |
-| Holders | only if `holdersApiUrl` is set — see section 2 |
+| Holders | the proxy in `api/holders.js` — see section 2 |
 
-The response is an array of pairs. The site picks the deepest one by USD liquidity and breaks ties on 24 h volume, because while the token is still on the bonding curve DEXScreener reports no liquidity figure at all. Before the first trade the API answers `"pairs": null`, and the panel says *Waiting for the first trade* rather than showing an error.
+Two endpoints are tried in order, because they are not interchangeable:
+
+1. `https://api.dexscreener.com/tokens/v1/solana/<mint>` — answers with a **bare array** of pairs.
+2. `https://api.dexscreener.com/latest/dex/tokens/<mint>` — answers with an **object** holding a `pairs` array, which is `null` before the first trade.
+
+Both shapes are normalised to an array, and the second is only used if the first fails or comes back empty. No API key, and the published limit is around 300 requests a minute, so polling every 30 seconds is nowhere near it.
+
+**Always pick by liquidity, never take the first element.** This token proves why: the old endpoint returns two pairs, the graduated PumpSwap pool and the abandoned bonding curve. The curve pair reports no liquidity at all and a price change in the hundreds of percent. The site sorts by USD liquidity and breaks ties on 24 h volume, which picks the real pool and also picks correctly while a coin is still on the curve, where DEXScreener reports no liquidity figure for anything.
 
 **Note it is the `tokens` endpoint, not `pairs`.** The address above is the mint, and a mint has no pair address until something trades.
 
@@ -53,22 +60,36 @@ If a refresh fails, the last known values stay on screen with a timestamp and a 
 
 ### What the panel deliberately does not show
 
-There is **no payout countdown and no distribution total**. How pump.fun accounts for Trader Cashback on-chain is not publicly documented, so there is nothing here that can be read and verified. Rather than leave two dead cards in the panel, those tiles were removed. Do not add a timer for a payout whose cadence you cannot prove.
+There is **no cashback total, no last payout and no countdown**, and this was checked rather than assumed. pump.fun's own coin record exposes exactly one cashback-related field, the boolean `is_cashback_enabled`. No amount, no running total, no payout history — and that is true even for coins where cashback *is* switched on, so there is nothing to read even in principle. Rather than leave dead cards in the panel, those tiles are not there. Do not add a timer for a payout whose cadence you cannot prove, and do not derive a cashback figure from volume.
 
 ---
 
-## 2. Holder count (optional, off by default)
+## 2. Holder count — `api/holders.js`
 
-Solana's public RPC cannot give a holder total. `getTokenLargestAccounts` returns the top accounts only, and `getProgramAccounts` over the token program is disabled on public endpoints (and would be far too large for a browser anyway). A real total needs an indexer — Helius, Birdeye or Solscan Pro — and all of them require an API key.
+Solana's public RPC cannot give a holder total. `getTokenLargestAccounts` returns the top accounts only, and `getProgramAccounts` over the token program is disabled on public endpoints and would be far too large for a browser anyway. A real total needs an indexer, and every indexer wants an API key.
 
-**This site is static.** It has no server and no build step, so anything written into `main.js` is readable by anyone who opens the page. Do not paste a private API key into this repo.
+**The site is static, so a key in `main.js` would be public** and anyone could burn the quota. `api/holders.js` is a single Vercel serverless function that keeps the key server-side. The browser only ever calls `/api/holders`. That one function does not make this an app; the rest of the site is still plain files.
 
-The workable options:
+**To switch the Holders tile on**, set one of these in Vercel under *Settings → Environment Variables*, for Production and Preview, then redeploy:
 
-1. **Leave it off** (default). `holdersApiUrl: null` removes the tile and the panel shows four live tiles.
-2. **Put a small proxy in front of it.** A serverless function that holds the key server-side, calls the indexer, and answers with JSON. Point `holdersApiUrl` at the proxy. `.env.example` lists the variables such a proxy would read.
+| Variable | Provider | Cost of a lookup |
+|---|---|---|
+| `BIRDEYE_API_KEY` | Birdeye | one call, exact count (recommended) |
+| `SOLSCAN_API_KEY` | Solscan Pro | one call, exact count |
+| `HELIUS_API_KEY` | Helius | pages through token accounts, several calls |
 
-`holdersApiUrl` may contain `{mint}`, which is replaced with `contractAddress`. The response is searched for the first of `holders`, `holderCount`, `holder_count`, `total` or `result`, at the top level or inside `data`.
+They are tried in that order and the first that answers wins. `.env.example` holds the names only, never a value.
+
+Behaviour, by design:
+
+- **No key set** → the function answers `501 not_configured` and the front end **removes the Holders tile**. No dead card, no empty field.
+- **Key set** → `{ "holders": n }`, cached in the function for 60 seconds plus a CDN `s-maxage`, so polling every 30 s costs the provider roughly one call a minute.
+- **Provider down** → the last good value is served marked `stale`; with nothing cached it returns 502 and the tile keeps whatever it last showed.
+- **Too many holders to count exactly** (the Helius path only) → it **fails rather than returning a floor**, because a partial count shown as a total is a wrong number.
+
+$DELIVERY is an SPL **Token-2022** mint (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`), not classic SPL Token. The Helius path uses `getTokenAccounts`, which covers both, and skips zero balances so closed accounts do not inflate the count.
+
+`holdersApiUrl` may contain `{mint}`, which is replaced with `contractAddress`. The response is searched for the first of `holders`, `holderCount`, `holder_count`, `total` or `result`, at the top level or inside `data`, so any proxy shape works.
 
 ---
 
@@ -145,6 +166,8 @@ Opening `index.html` directly from disk works too, except the gallery manifest l
 | Paired asset | SOL |
 | Supply | 1,000,000,000, fixed |
 | Fee | 0.3% on every trade, charged by pump.fun |
+| Pool | PumpSwap `JDAY2ptw6QikC4PHvsbL4VBGnFKRCc2XpKj2NcQjpZAS` — graduated off the bonding curve |
+| Token program | SPL Token-2022, 6 decimals |
 | Where the fee goes | **Trader Cashback** — back to the wallets trading the token, not to the creator. Chosen once before launch and irreversible |
 | Telegram | `https://t.me/deliveryguyonsol` |
 | X | `https://x.com/DeliveryGuy_SOL` |
@@ -152,6 +175,22 @@ Opening `index.html` directly from disk works too, except the gallery manifest l
 Solana needs no network to be added to a wallet, so there is no "Add network" button and no chain-id, RPC or EVM code anywhere in this repo.
 
 To change any copy, edit `index.html` directly.
+
+### Trader Cashback: pump.fun reports it as OFF for this token
+
+Checked on 2026-09-11, after launch. pump.fun's own coin record for this mint
+returns `is_cashback_enabled: false`.
+
+The field is meaningful, not a stub: of 40 live coins sampled from the same API
+on the same day, one returned `true` and 39 returned `false`. Ours is in the
+second group.
+
+**The copy on this site says the 0.3% fee goes back to traders as cashback.**
+That claim rests on the switch being on. Until either pump.fun reports it as on
+for this mint, or the mechanism is confirmed some other way, the claim and the
+API disagree, and the API is the one that can be checked. This is flagged, not
+silently rewritten, because what the site should say instead is the owner's
+call. Do not wire any cashback number into the panel on the strength of the copy.
 
 ### Trader Cashback, stated carefully
 

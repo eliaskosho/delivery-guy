@@ -337,11 +337,31 @@ h3 { font-size: 1.05rem; font-weight: 700; line-height: 1.3; }
   overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
 }
 .stat--wide .stat__value { font-size: clamp(1.9rem, 7vw, 3.4rem); }
+/* The featured tile is wide enough for Unbounded. The rest are one column of an
+   auto-fit grid, and Unbounded is a wide display face: a sub-cent price runs to
+   11-12 glyphs ("$0.00009075") and broke mid-number. These use the body face,
+   which is built for figures and fits the column without shrinking to nothing. */
+.stat:not(.stat--wide) .stat__value {
+  font-family: var(--font-body);
+  font-size: clamp(1.15rem, 2vw, 1.4rem);
+  letter-spacing: -0.01em;
+}
 .stat__value--green { color: var(--green); }
 .stat__note { margin-top: 8px; font-size: 0.8rem; color: var(--ink-3); }
+/* 24 h price move: direction is carried by colour and by the sign, never colour alone. */
+.stat__note.is-up { color: var(--green); }
+.stat__note.is-down { color: var(--danger); }
 /* The wide tile eats one extra cell, so a lone tile at the end is the even
    one. Let it take the full row instead of sitting half-width by itself. */
-@media (max-width: 719px) { .stat:last-child:nth-child(even) { grid-column: span 2; } }
+/* Two tiles span the row on a phone: the featured one, and Price, whose
+   sub-cent value runs to 11+ glyphs and wrapped inside a half-width card.
+   The featured and Price tiles take two cells each, so with four tiles the
+   grid fills exactly; with five, the odd one out takes the row rather than
+   sitting alone at half width. */
+@media (max-width: 719px) {
+  .stat--price { grid-column: span 2; }
+  .stat:last-child:nth-child(odd) { grid-column: span 2; }
+}
 .live__meta { margin-top: 14px; font-size: 0.8rem; color: var(--ink-3); }
 @media (min-width: 720px) {
   .stats { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }

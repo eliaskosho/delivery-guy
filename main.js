@@ -39,9 +39,13 @@ const CONFIG = {
      The response is searched for the first of: holders, holderCount,
      holder_count, total, result — as a number or inside `data`.
 
-     null = the Holders tile is removed from the panel entirely.
+     Default: '/api/holders', the serverless proxy in api/holders.js. It keeps
+     the key in Vercel's environment variables and answers {"holders": n}.
+     With no key configured it answers 501, and the tile removes itself.
+
+     null = the Holders tile is removed from the panel without even asking.
   ------------------------------------------------------------------------ */
-  holdersApiUrl: null,
+  holdersApiUrl: '/api/holders',
 };
 
 /* ------------------------------------------------------------
@@ -275,11 +279,32 @@ function pickPair(pairs) {
   )[0] || null;
 }
 
+// The two DEXScreener token endpoints answer in different shapes: the newer one
+// returns a bare array of pairs, the older one an object with a `pairs` array
+// (null before the first trade). Both are normalised to an array here.
+const MARKET_ENDPOINTS = [
+  (mint) => `https://api.dexscreener.com/tokens/v1/solana/${mint}`,
+  (mint) => `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
+];
+function pairsOf(j) {
+  if (Array.isArray(j)) return j;
+  if (j && Array.isArray(j.pairs)) return j.pairs;
+  return [];
+}
+
 async function readMarket(mint) {
-  // The token endpoint, not the pair endpoint: the address above is the mint,
-  // and the mint has no pair address until something trades.
-  const j = await fetchJson(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
-  const pairs = Array.isArray(j.pairs) ? j.pairs : [];   // the API answers `"pairs": null` before the first trade
+  // The token endpoint, not the pair endpoint: the address is the mint, and a
+  // mint has no pair address of its own.
+  let pairs = [];
+  let lastErr = null;
+  for (const build of MARKET_ENDPOINTS) {
+    try {
+      pairs = pairsOf(await fetchJson(build(mint)));
+      lastErr = null;
+      if (pairs.length) break;
+    } catch (err) { lastErr = err; }
+  }
+  if (lastErr && !pairs.length) throw lastErr;   // every endpoint failed: keep the cached values
   const best = pickPair(pairs);
   if (!best) return { listed: false };
   const tx = best.txns?.h24;
@@ -293,6 +318,7 @@ async function readMarket(mint) {
     volume24hUsd: best.volume?.h24 != null ? Number(best.volume.h24) : null,
     buys24h: tx?.buys != null ? Number(tx.buys) : null,
     sells24h: tx?.sells != null ? Number(tx.sells) : null,
+    change24h: best.priceChange?.h24 != null ? Number(best.priceChange.h24) : null,
     dexId: best.dexId || null,
   };
 }
@@ -312,10 +338,22 @@ function pickHolderCount(j) {
   }
   return null;
 }
+// Three outcomes, and they are not the same thing:
+//   { count: n }      a real number
+//   { off: true }     no key configured, or no such function deployed -> drop the tile
+//   throws            a transient failure -> keep whatever was last known
 async function readHolders(mint) {
-  if (!CONFIG.holdersApiUrl) return null;
-  const j = await fetchJson(CONFIG.holdersApiUrl.replace('{mint}', encodeURIComponent(mint)));
-  return pickHolderCount(j);
+  const url = CONFIG.holdersApiUrl.replace('{mint}', encodeURIComponent(mint));
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  let res;
+  try { res = await fetch(url, { signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+  // 501 = the proxy is there but has no API key. 404 = no proxy deployed at all.
+  if (res.status === 501 || res.status === 404) return { off: true };
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const n = pickHolderCount(await res.json());
+  return n == null ? { off: true } : { count: n };
 }
 
 async function fetchStats() {
@@ -324,17 +362,25 @@ async function fetchStats() {
   if (CONFIG.holdersApiUrl) jobs.push(readHolders(mint));
 
   const settled = await Promise.allSettled(jobs);
-  if (settled.every((r) => r.status === 'rejected')) throw new Error('All stat sources failed');
+  // Decide the holder tile first, so it is pulled even during a market outage
+  // rather than sitting there as a dead card.
+  const h = settled[1]?.status === 'fulfilled' ? settled[1].value : null;
+  if (h && h.off) removeHoldersTile();
 
-  const market = settled[0].status === 'fulfilled' ? settled[0].value : null;
-  const holders = settled[1]?.status === 'fulfilled' ? settled[1].value : null;
+  // The market read IS the panel. If it fails, throw so the caller keeps the
+  // last known values instead of overwriting them with a screen full of dashes.
+  // A holder-count failure is survivable and only costs that one tile.
+  if (settled[0].status === 'rejected') throw settled[0].reason;
+
+  const market = settled[0].value;
   const failed = settled.filter((r) => r.status === 'rejected').length;
 
   return {
     updatedAt: Math.floor(Date.now() / 1000),
     partial: failed > 0,
     listed: market ? market.listed !== false : null,
-    holders,
+    holders: h && h.count != null ? h.count : null,
+    holdersOff: Boolean(h && h.off),
     priceUsd: market?.priceUsd ?? null,
     priceSol: market?.priceSol ?? null,
     quoteSymbol: market?.quoteSymbol ?? null,
@@ -343,6 +389,7 @@ async function fetchStats() {
     volume24hUsd: market?.volume24hUsd ?? null,
     buys24h: market?.buys24h ?? null,
     sells24h: market?.sells24h ?? null,
+    change24h: market?.change24h ?? null,
     dexId: market?.dexId ?? null,
   };
 }
@@ -401,7 +448,12 @@ function renderStats(s, { stale = false, unreachable = false, loading = false } 
   const idle = s.listed === false ? 'Once trading starts' : 'Not available right now';
 
   if (s.priceUsd != null) {
-    setStat('price', fmtUsd(s.priceUsd), s.priceSol != null ? `${fmtAmount(s.priceSol)} ${s.quoteSymbol || 'SOL'} per $DELIVERY` : 'per $DELIVERY');
+    const bits = [];
+    if (s.change24h != null) bits.push(`${s.change24h > 0 ? '+' : ''}${s.change24h.toFixed(1)}% in 24 h`);
+    if (s.priceSol != null) bits.push(`${fmtAmount(s.priceSol)} ${s.quoteSymbol || 'SOL'}`);
+    setStat('price', fmtUsd(s.priceUsd), bits.length ? bits.join(' · ') : 'per $DELIVERY');
+    const note = $('[data-stat-note="price"]');
+    if (note) note.className = `stat__note${s.change24h == null ? '' : s.change24h > 0 ? ' is-up' : s.change24h < 0 ? ' is-down' : ''}`;
   } else setStat('price', '—', idle);
 
   if (s.marketCapUsd != null) setStat('marketCap', fmtUsd(s.marketCapUsd), s.liquidityUsd != null ? `${fmtUsd(s.liquidityUsd)} liquidity` : 'Price × supply');
@@ -415,7 +467,10 @@ function renderStats(s, { stale = false, unreachable = false, loading = false } 
     setStat('trades', fmtInt(buys + sells), `${fmtInt(buys)} buys · ${fmtInt(sells)} sells · last 24 h`);
   } else setStat('trades', '—', idle);
 
-  if (CONFIG.holdersApiUrl) {
+  // A holder count needs a keyed indexer behind the proxy. If none is configured
+  // the tile is pulled rather than left showing a dash forever.
+  if (s.holdersOff) removeHoldersTile();
+  else if (CONFIG.holdersApiUrl) {
     if (s.holders != null) setStat('holders', fmtInt(s.holders), 'Wallets holding $DELIVERY');
     else setStat('holders', '—', idle);
   }
@@ -442,12 +497,14 @@ async function refreshStats() {
   }
 }
 
+function removeHoldersTile() {
+  const tile = $('[data-stat="holders"]')?.closest('.stat');
+  if (tile) tile.remove();
+}
+
 function initLivePanel() {
-  // No holder source configured: drop the tile rather than leave a dead card.
-  if (!CONFIG.holdersApiUrl) {
-    const tile = $('[data-stat="holders"]')?.closest('.stat');
-    if (tile) tile.remove();
-  }
+  // No holder source configured at all: drop the tile before the first paint.
+  if (!CONFIG.holdersApiUrl) removeHoldersTile();
 
   if (!isMint(CONFIG.contractAddress)) { renderStats(null, { unreachable: true }); return; }
 
