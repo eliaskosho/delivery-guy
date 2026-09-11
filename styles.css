@@ -259,9 +259,22 @@ h3 { font-size: 1.05rem; font-weight: 700; line-height: 1.3; }
   mask-image: radial-gradient(circle at 50% 50%, transparent 55%, #000 56%);
   -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 55%, #000 56%);
 }
+/* The mascot art is portrait (843x1100) and its bbox is cropped tight, so the
+   cap touches the very top of the file. Sizing by width overflowed the disc and
+   sliced the head off; `cover` cannot help either, because it fills the box edge
+   to edge and the circle has no width left at its top point. `contain` scales
+   the whole figure in, and the top padding buys the air above the cap that
+   keeps it clear of the curve. Bottom-aligned, so the mascot stands on the disc
+   and reads as optically centred rather than floating in the middle of it. */
 .hero__mascot img {
-  position: absolute; left: 50%; bottom: -1%; width: 94%; height: auto;
-  transform: translateX(-52%);
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  /* 59% horizontally, not 50%: the figure's own alpha centroid sits at 46.4% of
+     the file's width (the box juts out right, the head leans left), so centring
+     the box would leave the mascot visibly off to one side. */
+  object-position: 59% 100%;
+  padding: 7% 0 0;
   filter: drop-shadow(0 12px 18px rgba(0,0,0,0.25));
 }
 .hero__title {
